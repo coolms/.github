@@ -1,0 +1,101 @@
+name: Angular library
+
+# Called by every ng-packagr package in the set. All eight have byte-identical
+# `scripts`, so the steps belong in one place: with only two copies in existence
+# they had already drifted to 53 and 71 lines, differing in the Node matrix, the
+# install command, and whether lint ran at all.
+#
+# A caller supplies only what genuinely differs.
+
+on:
+  workflow_call:
+    inputs:
+      node-versions:
+        description: 'JSON array of Node majors, e.g. ["22","24"]'
+        type: string
+        default: '["22","24"]'
+      bundle:
+        description: >-
+          Path to the fesm2022 bundle, when the package ships one, so the
+          framework-external assertion can run. Empty skips that step.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ${{ fromJSON(inputs.node-versions) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # This step is what decides whether the package is really standalone: it
+      # installs into an EMPTY tree, with no sibling packages and none of the
+      # shared node_modules the working copy reaches through a symlink.
+      #
+      # `npm ci` only when a lockfile exists, and only one package in the set
+      # has one. A library ships without on purpose -- a lockfile pins the dev
+      # toolchain while every consumer resolves its own tree anyway, and
+      # resolving fresh each run is what catches a peer or a build tool drifting
+      # out from under the declared ranges.
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      # Types first: the cheapest signal, and the one most likely to catch a
+      # sibling API change, since these libraries are consumed from source by
+      # the application rather than from a published build.
+      - name: Typecheck
+        run: npm run typecheck
+
+      # The lint config is VENDORED into each package (eslint.config.base.mjs)
+      # precisely so it can run here rather than only inside the application.
+      - name: Lint
+        run: npm run lint
+
+      # ng-packagr writes dist/. Building is what proves the public API surface
+      # compiles as a package, not merely that the sources typecheck -- and the
+      # application consumes these from source, so nothing else ever runs it.
+      - name: Build the package
+        run: npm run build
+
+      # A build that silently produced nothing would pass every step above.
+      - name: Assert the build produced a package
+        run: |
+          test -f dist/package.json || {
+            echo "::error::no dist/package.json -- the build produced nothing"
+            exit 1
+          }
+          echo "built: $(find dist -type f | wc -l) files"
+
+      # Both assertions are POSITIVE -- they name what must be present, so the
+      # step cannot pass by finding nothing.
+      #
+      # If Angular ended up INSIDE the bundle the package would stop being a
+      # library: two copies of the framework in one application fail at runtime,
+      # and the symptom is a blank screen rather than an error anyone can
+      # search for. If the output were fully compiled rather than partial, it
+      # would be pinned to the exact Angular it was built against.
+      - name: Library output, framework external
+        if: inputs.bundle != ''
+        run: |
+          test -f '${{ inputs.bundle }}'
+          grep -q "from '@angular/core'" '${{ inputs.bundle }}'
+          grep -q 'ngDeclareInjectable' '${{ inputs.bundle }}'
+          echo "confirmed: framework external, partial-compiled output"
