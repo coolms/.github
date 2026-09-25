@@ -92,10 +92,14 @@ jobs:
       # and the symptom is a blank screen rather than an error anyone can
       # search for. If the output were fully compiled rather than partial, it
       # would be pinned to the exact Angular it was built against.
+      #
+      # Either quote: ng-packagr 22.2.1 (resolved fresh, there is no lockfile)
+      # writes `from "@angular/core"`, and the single-quote match failed every
+      # package's build from 2026-09-25 with the framework still external.
       - name: Library output, framework external
         if: inputs.bundle != ''
         run: |
           test -f '${{ inputs.bundle }}'
-          grep -q "from '@angular/core'" '${{ inputs.bundle }}'
+          grep -qE "from ['\"]@angular/core['\"]" '${{ inputs.bundle }}'
           grep -q 'ngDeclareInjectable' '${{ inputs.bundle }}'
           echo "confirmed: framework external, partial-compiled output"
