@@ -156,10 +156,20 @@ jobs:
       # Either quote: ng-packagr 22.2.1 (resolved fresh, before the lockfiles)
       # writes `from "@angular/core"`, and the single-quote match failed every
       # package's build from 2026-09-25 with the framework still external.
+      #
+      # ANY partial declaration, not one kind: partial compilation leaves
+      # ngDeclareFactory + ngDeclareClassMetadata for every decorated class and
+      # ngDeclareInjectable / Component / Directive / Pipe / NgModule by kind.
+      # Asserting ngDeclareInjectable held only for packages that happen to have
+      # a service -- pdf-angular (one component, no service) failed it on
+      # 2026-09-27 with the framework external and the output partial. Each
+      # assertion now names itself when it fails; a bare `grep -q` said nothing.
       - name: Library output, framework external
         if: inputs.bundle != ''
+        env:
+          BUNDLE: ${{ inputs.bundle }}
         run: |
-          test -f '${{ inputs.bundle }}'
-          grep -qE "from ['\"]@angular/core['\"]" '${{ inputs.bundle }}'
-          grep -q 'ngDeclareInjectable' '${{ inputs.bundle }}'
-          echo "confirmed: framework external, partial-compiled output"
+          test -f "$BUNDLE" || { echo "::error::no bundle at $BUNDLE -- the build did not write it"; exit 1; }
+          grep -qE "from ['\"]@angular/core['\"]" "$BUNDLE" || { echo "::error::$BUNDLE imports nothing from @angular/core -- the framework is inside the bundle, or nothing Angular was built"; exit 1; }
+          grep -qE 'ngDeclare(Factory|Injectable|Component|Directive|Pipe|NgModule|ClassMetadata)' "$BUNDLE" || { echo "::error::$BUNDLE holds no partial declaration (ngDeclare*) -- fully compiled output is pinned to the Angular it was built with"; exit 1; }
+          echo "confirmed: framework external, partial-compiled output -- $(grep -oE 'ngDeclare[A-Za-z]+' "$BUNDLE" | sort | uniq -c | awk '{ printf "%s%s x%s", (NR > 1 ? ", " : ""), $2, $1 }')"
