@@ -17,7 +17,57 @@
       "required": [],
       "workflow": "angular-library.yml"
     },
+    "document-viewer-angular": {
+      "caller_job": "ci",
+      "node_versions": null,
+      "protected": true,
+      "required": [
+        "ci / Node 22",
+        "ci / Node 24"
+      ],
+      "workflow": "angular-library.yml"
+    },
+    "dtmpl-angular": {
+      "caller_job": "ci",
+      "node_versions": null,
+      "protected": true,
+      "required": [
+        "ci / Node 22",
+        "ci / Node 24"
+      ],
+      "workflow": "angular-library.yml"
+    },
     "editor-angular": {
+      "caller_job": "ci",
+      "node_versions": null,
+      "protected": true,
+      "required": [
+        "ci / Node 22",
+        "ci / Node 24"
+      ],
+      "workflow": "angular-library.yml"
+    },
+    "image-editor-angular": {
+      "caller_job": "ci",
+      "node_versions": null,
+      "protected": true,
+      "required": [
+        "ci / Node 22",
+        "ci / Node 24"
+      ],
+      "workflow": "angular-library.yml"
+    },
+    "pdf-angular": {
+      "caller_job": "ci",
+      "node_versions": null,
+      "protected": true,
+      "required": [
+        "ci / Node 22",
+        "ci / Node 24"
+      ],
+      "workflow": "angular-library.yml"
+    },
+    "sheet-editor-angular": {
       "caller_job": "ci",
       "node_versions": null,
       "protected": true,
@@ -38,5 +88,5 @@
       "workflow": "angular-library.yml"
     }
   },
-  "taken": "2026-09-26T23:36:33Z"
+  "taken": "2026-09-26T23:55:03Z"
 }
