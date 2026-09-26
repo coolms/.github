@@ -34,7 +34,11 @@ permissions:
 
 jobs:
   build:
-    name: Node ${{ matrix.node }} (${{ inputs.resolve != '' && inputs.resolve || ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'latest' || 'lockfile') }})
+    # !! The job's name is what branch protection requires (`ci / Node 22`,
+    # `ci / Node 24`): it must not change. On 2026-09-26 it carried the resolve
+    # mode ("Node 22 (lockfile)"), the required checks never arrived, and every
+    # pull request in core-angular was BLOCKED. The mode is on the install step.
+    name: Node ${{ matrix.node }}
     runs-on: ubuntu-latest
     env:
       RESOLVE: ${{ inputs.resolve != '' && inputs.resolve || ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'latest' || 'lockfile') }}
@@ -66,7 +70,7 @@ jobs:
       #    declared ranges allow. This is where the next upstream change shows up
       #    first, in a run that blocks nobody; the next step names every version
       #    it differs from the lockfile in.
-      - name: Install dependencies
+      - name: Install dependencies (${{ env.RESOLVE }})
         run: |
           case "$RESOLVE" in
             lockfile)
