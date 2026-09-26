@@ -17,6 +17,16 @@
       "required": [],
       "workflow": "angular-library.yml"
     },
+    "editor-angular": {
+      "caller_job": "ci",
+      "node_versions": null,
+      "protected": true,
+      "required": [
+        "ci / Node 22",
+        "ci / Node 24"
+      ],
+      "workflow": "angular-library.yml"
+    },
     "ui-angular": {
       "caller_job": "ci",
       "node_versions": null,
@@ -28,5 +38,5 @@
       "workflow": "angular-library.yml"
     }
   },
-  "taken": "2026-09-26T22:23:35Z"
+  "taken": "2026-09-26T23:36:33Z"
 }
