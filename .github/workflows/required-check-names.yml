@@ -1,0 +1,23 @@
+name: Required check names
+
+# A change to a shared workflow must not rename away a check another repository requires
+# (2026-09-26: `Node 22` -> `Node 22 (lockfile)` blocked every core-angular pull request).
+# The comparison is .github/scripts/check-required-names.py against the snapshot in
+# .github/required-checks.json; refresh the snapshot with snapshot-required-checks.sh.
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  names:
+    name: Required check names still produced
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 .github/scripts/check-required-names.py
