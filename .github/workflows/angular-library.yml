@@ -20,14 +20,24 @@ on:
           framework-external assertion can run. Empty skips that step.
         type: string
         default: ''
+      resolve:
+        description: >-
+          `lockfile` installs the committed package-lock.json with npm ci;
+          `latest` resolves the newest versions the ranges allow. Empty (the
+          default) picks by event: a schedule or a manual dispatch is
+          `latest`, a push or a pull request is `lockfile`.
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Node ${{ matrix.node }}
+    name: Node ${{ matrix.node }} (${{ inputs.resolve != '' && inputs.resolve || ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'latest' || 'lockfile') }})
     runs-on: ubuntu-latest
+    env:
+      RESOLVE: ${{ inputs.resolve != '' && inputs.resolve || ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'latest' || 'lockfile') }}
 
     strategy:
       fail-fast: false
@@ -45,18 +55,64 @@ jobs:
       # installs into an EMPTY tree, with no sibling packages and none of the
       # shared node_modules the working copy reaches through a symlink.
       #
-      # `npm ci` only when a lockfile exists, and only one package in the set
-      # has one. A library ships without on purpose -- a lockfile pins the dev
-      # toolchain while every consumer resolves its own tree anyway, and
-      # resolving fresh each run is what catches a peer or a build tool drifting
-      # out from under the declared ranges.
+      # Two ways to resolve that tree (Dmitry, 2026-09-26). Until then there was
+      # no lockfile and every run resolved the newest versions -- so on
+      # 2026-09-25 ng-packagr 22.2.1 changed its quote style and turned every
+      # package's pull request red for a reason outside any of them.
+      #  - `lockfile` (a push, a pull request): `npm ci` from the COMMITTED
+      #    lockfile. A pull request is built with the toolchain it was given, and
+      #    no lockfile is an error, not a fallback to "whatever resolves today".
+      #  - `latest` (the weekly schedule, or run by hand): the newest versions the
+      #    declared ranges allow. This is where the next upstream change shows up
+      #    first, in a run that blocks nobody; the next step names every version
+      #    it differs from the lockfile in.
       - name: Install dependencies
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install --no-audit --no-fund
-          fi
+          case "$RESOLVE" in
+            lockfile)
+              if [ ! -f package-lock.json ]; then
+                echo "::error::no package-lock.json -- a push or a pull request installs the committed lockfile (npm ci). Commit one: npm install --package-lock-only"
+                exit 1
+              fi
+              npm ci ;;
+            latest)
+              if [ -f package-lock.json ]; then cp package-lock.json "$RUNNER_TEMP/committed-lock.json"; fi
+              rm -f package-lock.json
+              npm install --no-audit --no-fund ;;
+            *)
+              echo "::error::resolve must be lockfile or latest, got '$RESOLVE'"
+              exit 1 ;;
+          esac
+
+      # The report of a `latest` run: which packages resolve to a version the
+      # committed lockfile does not hold. In the run's summary, with the count
+      # first, so "0 of N" is a statement and not an empty section.
+      - name: The newest versions, against the lockfile
+        if: env.RESOLVE == 'latest'
+        run: |
+          node -e '
+            const fs = require("fs");
+            const read = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")).packages || {}; } catch { return null; } };
+            const was = read(process.env.RUNNER_TEMP + "/committed-lock.json");
+            const now = read("package-lock.json") || {};
+            const name = (k) => k.replace(/^node_modules\//, "");
+            const lines = ["### Newest versions against the committed lockfile"];
+            if (was === null) {
+              lines.push("There is no committed lockfile to compare with.");
+            } else {
+              const differ = [];
+              for (const [k, v] of Object.entries(now)) {
+                if (k === "") continue;
+                if (!was[k]) differ.push("- " + name(k) + ": " + v.version + " (not in the lockfile)");
+                else if (was[k].version !== v.version) differ.push("- " + name(k) + ": " + was[k].version + " -> " + v.version);
+              }
+              lines.push(differ.length + " of " + (Object.keys(now).length - 1) + " installed packages differ from the lockfile.");
+              lines.push(...differ.slice(0, 300));
+              if (differ.length > 300) lines.push("- ... and " + (differ.length - 300) + " more");
+            }
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+            console.log(lines.slice(0, 2).join("\n"));
+          '
 
       # Types first: the cheapest signal, and the one most likely to catch a
       # sibling API change, since these libraries are consumed from source by
@@ -93,7 +149,7 @@ jobs:
       # search for. If the output were fully compiled rather than partial, it
       # would be pinned to the exact Angular it was built against.
       #
-      # Either quote: ng-packagr 22.2.1 (resolved fresh, there is no lockfile)
+      # Either quote: ng-packagr 22.2.1 (resolved fresh, before the lockfiles)
       # writes `from "@angular/core"`, and the single-quote match failed every
       # package's build from 2026-09-25 with the framework still external.
       - name: Library output, framework external
