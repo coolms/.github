@@ -11,7 +11,8 @@ name: npm advisories
 #
 # When the registry cannot be asked (a network error or a 5xx), the run says the advisories were NOT evaluated, with a
 # warning, and does not fail: that is the network, not the change. It is never reported as clear. Any other error --
-# a lockfile npm cannot read, say -- fails. A listed severity the audit no longer reports fails too (re-rated).
+# a lockfile npm cannot read, say -- fails, and so does no report at all: with --json npm reports even a network
+# failure as JSON. A listed severity the audit no longer reports fails too (re-rated).
 
 on:
   workflow_call:
@@ -81,27 +82,38 @@ jobs:
             }
 
             let report = null;
-            let why = null;
+            let noReport = null;
             try {
               const text = fs.readFileSync(process.env.AUDIT, "utf8");
-              if (!text.trim()) why = "empty output";
+              if (!text.trim()) noReport = "npm wrote nothing";
               else report = JSON.parse(text);
             } catch (e) {
-              why = why || ("no report: " + String(e.message).split("\n")[0].slice(0, 160));
+              noReport = noReport || ("npm wrote no report: " + String(e.message).split("\n")[0].slice(0, 160));
             }
-            // Only the registry out of reach is "not evaluated". Any other error -- a lockfile npm cannot read (ENOLOCK), say --
-            // is about the repository, and is FOUND: a broken lockfile must not stay green under a network warning.
+            if (!noReport && (report === null || typeof report !== "object")) noReport = "npm wrote JSON that is not a report";
+            // With --json npm writes a JSON object even when the registry is out of reach (npm 11.19, measured 2026-10-07), so no
+            // report at all is npm itself failing: FOUND, never green under a warning.
+            if (noReport) {
+              out("advisories: FOUND -- " + noReport + " (with --json npm reports even a network failure as JSON)");
+              finish(1);
+            }
+            // Only the registry out of reach is "not evaluated". Where npm puts the reason, measured: a network failure only in the
+            // top-level message ("... failed, reason: connect ECONNREFUSED ...", error.summary empty); a registry 5xx as
+            // statusCode; anything else as error.code (ENOLOCK: no lockfile, or one npm cannot parse). Any reason that is not the
+            // network is about the repository, and is FOUND: a broken lockfile must not stay green under a network warning.
             const unreachable = /^(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|E5\d\d)$/;
-            if (report && report.error) {
-              const code = String(report.error.code || "");
-              const said = "npm said " + (code || "an error") + ": " + String(report.error.summary || "").trim().slice(0, 160);
+            let why = null;
+            if (!report.vulnerabilities) {
+              const err = report.error && typeof report.error === "object" ? report.error : {};
+              const inMessage = /\bE[A-Z0-9_]{2,}\b/.exec(String(report.message || ""));
+              const code = String(err.code || (report.statusCode ? "E" + report.statusCode : "") || (inMessage ? inMessage[0] : ""));
+              const said = "npm said " + (code || "an error") + ": " + String(err.summary || report.message || "").trim().slice(0, 160);
               if (!unreachable.test(code)) {
                 out("advisories: FOUND -- the audit failed for a reason that is not the network: " + said);
                 finish(1);
               }
               why = said;
             }
-            else if (report && !report.vulnerabilities) why = "not an audit report (no vulnerabilities key)";
 
             if (why) {
               out("advisories: NOT evaluated -- " + why + "; " + listed.size + " listed in " + listPath);

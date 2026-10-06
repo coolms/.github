@@ -59,7 +59,8 @@ a new one fails the job, and so does a listed one that is no longer reported, so
 the list only shrinks; a listed severity the audit no longer reports fails too.
 When the registry cannot be asked (a network error or a 5xx), the run says the
 advisories were not evaluated and does not fail; any other error, a lockfile npm
-cannot read for one, fails. A repository calls it as a job:
+cannot read for one, fails, and so does no report at all (with `--json` npm
+reports even a network failure as JSON). A repository calls it as a job:
 
 ```yaml
 jobs:
