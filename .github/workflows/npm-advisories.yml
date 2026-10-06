@@ -9,8 +9,9 @@ name: npm advisories
 #
 #   <package> <advisory id> <severity> <why it stays>
 #
-# When the registry cannot be asked, the run says the advisories were NOT evaluated, with a warning, and does not
-# fail: that is the network, not the change. It is never reported as clear.
+# When the registry cannot be asked (a network error or a 5xx), the run says the advisories were NOT evaluated, with a
+# warning, and does not fail: that is the network, not the change. It is never reported as clear. Any other error --
+# a lockfile npm cannot read, say -- fails. A listed severity the audit no longer reports fails too (re-rated).
 
 on:
   workflow_call:
@@ -64,6 +65,7 @@ jobs:
 
             const listPath = process.env.LIST;
             const listed = new Map();
+            const severity = new Map();
             const malformed = [];
             if (fs.existsSync(listPath)) {
               fs.readFileSync(listPath, "utf8").split("\n").forEach((raw, i) => {
@@ -74,6 +76,7 @@ jobs:
                 const key = f[0] + " " + f[1];
                 if (listed.has(key)) { malformed.push(listPath + ":" + (i + 1) + ": " + key + " is listed twice (first at line " + listed.get(key) + ")"); return; }
                 listed.set(key, i + 1);
+                severity.set(key, f[2]);
               });
             }
 
@@ -86,7 +89,18 @@ jobs:
             } catch (e) {
               why = why || ("no report: " + String(e.message).split("\n")[0].slice(0, 160));
             }
-            if (report && report.error) why = "npm said " + (report.error.code || "an error") + ": " + String(report.error.summary || "").trim().slice(0, 160);
+            // Only the registry out of reach is "not evaluated". Any other error -- a lockfile npm cannot read (ENOLOCK), say --
+            // is about the repository, and is FOUND: a broken lockfile must not stay green under a network warning.
+            const unreachable = /^(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|E5\d\d)$/;
+            if (report && report.error) {
+              const code = String(report.error.code || "");
+              const said = "npm said " + (code || "an error") + ": " + String(report.error.summary || "").trim().slice(0, 160);
+              if (!unreachable.test(code)) {
+                out("advisories: FOUND -- the audit failed for a reason that is not the network: " + said);
+                finish(1);
+              }
+              why = said;
+            }
             else if (report && !report.vulnerabilities) why = "not an audit report (no vulnerabilities key)";
 
             if (why) {
@@ -106,13 +120,15 @@ jobs:
             }
             const fresh = [...reported.keys()].filter((k) => !listed.has(k)).sort();
             const gone = [...listed.keys()].filter((k) => !reported.has(k)).sort();
+            const rerated = [...listed.keys()].filter((k) => reported.has(k) && reported.get(k).split(" ")[0] !== severity.get(k)).sort();
 
             out("advisories: " + reported.size + " reported by npm audit (the committed lockfile) against " + listed.size + " listed in " + listPath);
             fresh.forEach((k) => out("  NEW    " + k + " [" + reported.get(k) + "]"));
             gone.forEach((k) => out("  GONE   " + k + " -- cleared: take line " + listed.get(k) + " off the list"));
+            rerated.forEach((k) => out("  RERATED " + k + " -- listed " + severity.get(k) + ", reported " + reported.get(k).split(" ")[0] + ": line " + listed.get(k)));
             malformed.forEach((m) => out("  LIST   " + m));
-            if (fresh.length || gone.length || malformed.length) {
-              out("advisories: FOUND -- " + fresh.length + " new, " + gone.length + " cleared but still listed, " + malformed.length + " malformed line(s). A new advisory is cleared by an update, or written on the list with why it stays.");
+            if (fresh.length || gone.length || rerated.length || malformed.length) {
+              out("advisories: FOUND -- " + fresh.length + " new, " + gone.length + " cleared but still listed, " + rerated.length + " re-rated, " + malformed.length + " malformed line(s). A new advisory is cleared by an update, or written on the list with why it stays.");
               finish(1);
             }
             out("advisories: CLEAR -- every advisory reported is listed, and every one listed is still reported");
