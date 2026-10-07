@@ -37,6 +37,8 @@ jobs:
 
 The steps are install, typecheck, lint, build, and two positive assertions — that
 the build produced a package, and that Angular did not end up inside the bundle.
+Beside them, an `advisories` job holds the committed lockfile's advisories against
+the package's `.github/advisories.txt` (`npm-advisories.yml`, below).
 
 ## Who can call it today
 
