@@ -1,0 +1,148 @@
+name: npm advisories
+
+# Advisories may only fall (2026-10-07). `npm audit` reads the COMMITTED lockfile, and every advisory it reports must
+# be on the repository's list (.github/advisories.txt by default; a missing list is an empty one). A new advisory
+# fails the job -- a dependency a pull request brings, or one published since the last run -- and so does a line on
+# the list whose advisory is no longer reported, so the list only shrinks.
+#
+# The list, one advisory per line, `#` starts a comment:
+#
+#   <package> <advisory id> <severity> <why it stays>
+#
+# When the registry cannot be asked (a network error or a 5xx), the run says the advisories were NOT evaluated, with a
+# warning, and does not fail: that is the network, not the change. It is never reported as clear. Any other error --
+# a lockfile npm cannot read, say -- fails, and so does no report at all: with --json npm reports even a network
+# failure as JSON. A listed severity the audit no longer reports fails too (re-rated).
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: The directory holding package.json and package-lock.json.
+        type: string
+        default: '.'
+      list:
+        description: The list of known advisories, from the repository root.
+        type: string
+        default: '.github/advisories.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Advisories against the list
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The lockfile only: no install, so nothing a package runs at install time can change the answer.
+      - name: Audit the committed lockfile
+        run: |
+          test -f package-lock.json || { echo "::error::no package-lock.json in ${{ inputs.working-directory }}"; exit 1; }
+          npm audit --json --package-lock-only > "$RUNNER_TEMP/audit.json" 2> "$RUNNER_TEMP/audit.err" || true
+
+      - name: Advisories against the list
+        env:
+          AUDIT: ${{ runner.temp }}/audit.json
+          LIST: ${{ github.workspace }}/${{ inputs.list }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const out = (line) => { console.log(line); summary.push(line); };
+            const summary = [];
+            const finish = (code) => {
+              if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "### Advisories against the list\n" + summary.join("\n") + "\n");
+              process.exit(code);
+            };
+            const ghsa = /GHSA(-[23456789cfghjmpqrvwx]{4}){3}/;
+
+            const listPath = process.env.LIST;
+            const listed = new Map();
+            const severity = new Map();
+            const malformed = [];
+            if (fs.existsSync(listPath)) {
+              fs.readFileSync(listPath, "utf8").split("\n").forEach((raw, i) => {
+                const text = raw.split("#")[0].trim();
+                if (!text) return;
+                const f = text.split(/\s+/);
+                if (f.length < 3) { malformed.push(listPath + ":" + (i + 1) + ": want <package> <advisory> <severity> [why]"); return; }
+                const key = f[0] + " " + f[1];
+                if (listed.has(key)) { malformed.push(listPath + ":" + (i + 1) + ": " + key + " is listed twice (first at line " + listed.get(key) + ")"); return; }
+                listed.set(key, i + 1);
+                severity.set(key, f[2]);
+              });
+            }
+
+            let report = null;
+            let noReport = null;
+            try {
+              const text = fs.readFileSync(process.env.AUDIT, "utf8");
+              if (!text.trim()) noReport = "npm wrote nothing";
+              else report = JSON.parse(text);
+            } catch (e) {
+              noReport = noReport || ("npm wrote no report: " + String(e.message).split("\n")[0].slice(0, 160));
+            }
+            if (!noReport && (report === null || typeof report !== "object")) noReport = "npm wrote JSON that is not a report";
+            // With --json npm writes a JSON object even when the registry is out of reach (npm 11.19, measured 2026-10-07), so no
+            // report at all is npm itself failing: FOUND, never green under a warning.
+            if (noReport) {
+              out("advisories: FOUND -- " + noReport + " (with --json npm reports even a network failure as JSON)");
+              finish(1);
+            }
+            // Only the registry out of reach is "not evaluated". Where npm puts the reason, measured: a network failure only in the
+            // top-level message ("... failed, reason: connect ECONNREFUSED ...", error.summary empty); a registry 5xx as
+            // statusCode; anything else as error.code (ENOLOCK: no lockfile, or one npm cannot parse). Any reason that is not the
+            // network is about the repository, and is FOUND: a broken lockfile must not stay green under a network warning.
+            const unreachable = /^(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|E5\d\d)$/;
+            let why = null;
+            if (!report.vulnerabilities) {
+              const err = report.error && typeof report.error === "object" ? report.error : {};
+              const inMessage = /\bE[A-Z0-9_]{2,}\b/.exec(String(report.message || ""));
+              const code = String(err.code || (report.statusCode ? "E" + report.statusCode : "") || (inMessage ? inMessage[0] : ""));
+              const said = "npm said " + (code || "an error") + ": " + String(err.summary || report.message || "").trim().slice(0, 160);
+              if (!unreachable.test(code)) {
+                out("advisories: FOUND -- the audit failed for a reason that is not the network: " + said);
+                finish(1);
+              }
+              why = said;
+            }
+
+            if (why) {
+              out("advisories: NOT evaluated -- " + why + "; " + listed.size + " listed in " + listPath);
+              console.log("::warning::advisories were not evaluated -- " + why);
+              if (malformed.length) { malformed.forEach((m) => out("  LIST   " + m)); out("advisories: FOUND -- " + malformed.length + " malformed line(s)"); finish(1); }
+              finish(0);
+            }
+
+            const reported = new Map();
+            for (const v of Object.values(report.vulnerabilities)) {
+              for (const via of v.via || []) {
+                if (typeof via !== "object") continue;
+                const m = ghsa.exec(via.url || "");
+                reported.set((via.name || v.name) + " " + (m ? m[0] : String(via.source)), (via.severity || "unknown") + " " + (via.title || ""));
+              }
+            }
+            const fresh = [...reported.keys()].filter((k) => !listed.has(k)).sort();
+            const gone = [...listed.keys()].filter((k) => !reported.has(k)).sort();
+            const rerated = [...listed.keys()].filter((k) => reported.has(k) && reported.get(k).split(" ")[0] !== severity.get(k)).sort();
+
+            out("advisories: " + reported.size + " reported by npm audit (the committed lockfile) against " + listed.size + " listed in " + listPath);
+            fresh.forEach((k) => out("  NEW    " + k + " [" + reported.get(k) + "]"));
+            gone.forEach((k) => out("  GONE   " + k + " -- cleared: take line " + listed.get(k) + " off the list"));
+            rerated.forEach((k) => out("  RERATED " + k + " -- listed " + severity.get(k) + ", reported " + reported.get(k).split(" ")[0] + ": line " + listed.get(k)));
+            malformed.forEach((m) => out("  LIST   " + m));
+            if (fresh.length || gone.length || rerated.length || malformed.length) {
+              out("advisories: FOUND -- " + fresh.length + " new, " + gone.length + " cleared but still listed, " + rerated.length + " re-rated, " + malformed.length + " malformed line(s). A new advisory is cleared by an update, or written on the list with why it stays.");
+              finish(1);
+            }
+            out("advisories: CLEAR -- every advisory reported is listed, and every one listed is still reported");
+            finish(0);
+          '

@@ -50,3 +50,27 @@ Publishing the `@coolms/*` libraries to npm is what unblocks them, in dependency
 order: `core-angular` and `document-engine` first, then `editor-angular`,
 `ui-angular`, `document-viewer-angular`, then `pdf-angular`, `image-editor-angular`
 and `sheet-editor-angular`.
+
+## `npm-advisories.yml`
+
+Advisories may only fall. `npm audit` reads the committed `package-lock.json`, and
+every advisory it reports must be on the repository's list, `.github/advisories.txt`;
+a new one fails the job, and so does a listed one that is no longer reported, so
+the list only shrinks; a listed severity the audit no longer reports fails too.
+When the registry cannot be asked (a network error or a 5xx), the run says the
+advisories were not evaluated and does not fail; any other error, a lockfile npm
+cannot read for one, fails, and so does no report at all (with `--json` npm
+reports even a network failure as JSON). A repository calls it as a job:
+
+```yaml
+jobs:
+  advisories:
+    uses: coolms/.github/.github/workflows/npm-advisories.yml@develop
+    with:
+      working-directory: angular   # optional, default '.'
+```
+
+```text
+# .github/advisories.txt -- <package> <advisory id> <severity> <why it stays>
+source-map-js  GHSA-68fv-2mgg-jv7q  high  build tool only; the update waits for its dependents
+```
