@@ -29,6 +29,13 @@ on:
         description: The list of known advisories, from the repository root.
         type: string
         default: '.github/advisories.txt'
+      audit-command:
+        description: >-
+          A command whose stdout is the report, in the shape `npm audit --json` prints, run in the working directory
+          -- for what npm audit cannot see, such as a library a package bundles in its assets. Empty: npm audit of the
+          committed lockfile.
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -55,6 +62,7 @@ jobs:
       - name: Advisories against the list
         env:
           LIST: ${{ github.workspace }}/${{ inputs.list }}
+          AUDIT_CMD: ${{ inputs.audit-command }}
         run: |
           node -e '
             const fs = require("fs");
@@ -164,7 +172,8 @@ jobs:
             const expired = [...listed.keys()].filter((k) => day(reviewBy.get(k)) < day(today)).sort();
             const due = [...listed.keys()].filter((k) => !expired.includes(k) && day(reviewBy.get(k)) - day(today) <= 7).sort();
 
-            out("advisories: " + reported.size + " reported by npm audit (the committed lockfile) against " + listed.size + " listed in " + listPath + " (review dates held to " + today + ")");
+            const source = process.env.AUDIT_CMD ? "`" + command + "`" : "npm audit (the committed lockfile)";
+            out("advisories: " + reported.size + " reported by " + source + " against " + listed.size + " listed in " + listPath + " (review dates held to " + today + ")");
             fresh.forEach((k) => out("  NEW    " + k + " [" + now(k) + " " + reported.get(k).title + "]"));
             gone.forEach((k) => out("  GONE   " + k + " -- cleared: take line " + listed.get(k) + " off the list"));
             higher.forEach((k) => out("  HIGHER " + k + " -- accepted at " + accepted.get(k) + ", now " + now(k) + ": line " + listed.get(k)));
