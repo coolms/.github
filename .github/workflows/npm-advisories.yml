@@ -6,6 +6,8 @@ name: npm advisories
 #   - an advisory not on the list: a dependency a pull request brings, or one published since the last run;
 #   - a line on the list whose advisory is no longer reported, so the list only shrinks;
 #   - an advisory now rated HIGHER than its line records (a lower rating is named and passes);
+#   - a line past its review date (2026-10-07): at most 30 days out for critical and high, 90 for the rest. A review
+#     writes a new date and the reason as it stands then; a date further out than that is a malformed line;
 #   - a package.json with no package-lock.json beside it, so removing the lockfile is no way round the check;
 #   - any npm error, and no report at all.
 # A check that could not evaluate does not pass either, because a green check reads as clear: when the registry is
@@ -14,7 +16,7 @@ name: npm advisories
 #
 # The list, one advisory per line, `#` starts a comment:
 #
-#   <package> <advisory id> <severity accepted at> <why it stays>
+#   <package> <advisory id> <severity accepted at> <review by YYYY-MM-DD> <why it stays>
 
 on:
   workflow_call:
@@ -66,22 +68,33 @@ jobs:
             const sleep = (ms) => { if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
             const ghsa = /GHSA(-[23456789cfghjmpqrvwx]{4}){3}/;
             const rank = { info: 0, low: 1, moderate: 2, medium: 2, high: 3, critical: 4 };
+            // Every line is reviewed by a date (2026-10-07): at most 30 days out for critical and high, 90 for the rest. A line past
+            // its date fails until it is reviewed again -- a new reason and a new date -- or its advisory is cleared.
+            const horizon = (severity) => (rank[severity] >= rank.high ? 30 : 90);
+            const day = (iso) => Date.parse(iso + "T00:00:00Z") / 86400000;
+            const isDate = (iso) => /^\d{4}-\d{2}-\d{2}$/.test(iso) && !Number.isNaN(day(iso)) && new Date(iso + "T00:00:00Z").toISOString().slice(0, 10) === iso;
+            const today = process.env.ADVISORIES_TODAY || new Date().toISOString().slice(0, 10);
 
             const listPath = process.env.LIST;
             const listed = new Map();
             const accepted = new Map();
+            const reviewBy = new Map();
             const malformed = [];
             if (fs.existsSync(listPath)) {
               fs.readFileSync(listPath, "utf8").split("\n").forEach((raw, i) => {
                 const text = raw.split("#")[0].trim();
                 if (!text) return;
                 const f = text.split(/\s+/);
-                if (f.length < 3) { malformed.push(listPath + ":" + (i + 1) + ": want <package> <advisory> <severity> [why]"); return; }
-                if (!(f[2] in rank)) { malformed.push(listPath + ":" + (i + 1) + ": severity " + f[2] + " is not one of " + Object.keys(rank).join(", ")); return; }
+                const at = listPath + ":" + (i + 1) + ": ";
+                if (f.length < 5) { malformed.push(at + "want <package> <advisory> <severity> <review by YYYY-MM-DD> <why it stays>"); return; }
+                if (!(f[2] in rank)) { malformed.push(at + "severity " + f[2] + " is not one of " + Object.keys(rank).join(", ")); return; }
+                if (!isDate(f[3])) { malformed.push(at + "review date " + f[3] + " is not a date (YYYY-MM-DD)"); return; }
+                if (day(f[3]) - day(today) > horizon(f[2])) { malformed.push(at + "review date " + f[3] + " is more than " + horizon(f[2]) + " days after " + today + ", the most a " + f[2] + " line may run"); return; }
                 const key = f[0] + " " + f[1];
                 if (listed.has(key)) { malformed.push(listPath + ":" + (i + 1) + ": " + key + " is listed twice (first at line " + listed.get(key) + ")"); return; }
                 listed.set(key, i + 1);
                 accepted.set(key, f[2]);
+                reviewBy.set(key, f[3]);
               });
             }
 
@@ -148,17 +161,21 @@ jobs:
             // (what was accepted at the higher severity covers the lower). A severity npm does not name counts as higher.
             const higher = [...listed.keys()].filter((k) => reported.has(k) && !((rank[now(k)] ?? 99) <= rank[accepted.get(k)])).sort();
             const lower = [...listed.keys()].filter((k) => reported.has(k) && rank[now(k)] < rank[accepted.get(k)]).sort();
+            const expired = [...listed.keys()].filter((k) => day(reviewBy.get(k)) < day(today)).sort();
+            const due = [...listed.keys()].filter((k) => !expired.includes(k) && day(reviewBy.get(k)) - day(today) <= 7).sort();
 
-            out("advisories: " + reported.size + " reported by npm audit (the committed lockfile) against " + listed.size + " listed in " + listPath);
+            out("advisories: " + reported.size + " reported by npm audit (the committed lockfile) against " + listed.size + " listed in " + listPath + " (review dates held to " + today + ")");
             fresh.forEach((k) => out("  NEW    " + k + " [" + now(k) + " " + reported.get(k).title + "]"));
             gone.forEach((k) => out("  GONE   " + k + " -- cleared: take line " + listed.get(k) + " off the list"));
             higher.forEach((k) => out("  HIGHER " + k + " -- accepted at " + accepted.get(k) + ", now " + now(k) + ": line " + listed.get(k)));
             lower.forEach((k) => out("  lower  " + k + " -- accepted at " + accepted.get(k) + ", now " + now(k) + " (passes; line " + listed.get(k) + " may record it)"));
+            expired.forEach((k) => out("  EXPIRED " + k + " -- review by " + reviewBy.get(k) + " has passed: line " + listed.get(k) + " needs a new review (reason and date), or the advisory cleared"));
+            due.forEach((k) => out("  due    " + k + " -- review by " + reviewBy.get(k) + " (line " + listed.get(k) + ")"));
             malformed.forEach((m) => out("  LIST   " + m));
-            if (fresh.length || gone.length || higher.length || malformed.length) {
-              out("advisories: FOUND -- " + fresh.length + " new, " + gone.length + " cleared but still listed, " + higher.length + " re-rated higher, " + malformed.length + " malformed line(s). A new advisory is cleared by an update, or written on the list with why it stays.");
+            if (fresh.length || gone.length || higher.length || expired.length || malformed.length) {
+              out("advisories: FOUND -- " + fresh.length + " new, " + gone.length + " cleared but still listed, " + higher.length + " re-rated higher, " + expired.length + " past their review date, " + malformed.length + " malformed line(s). A new advisory is cleared by an update, or written on the list with its severity, review date and why it stays.");
               finish(1);
             }
-            out("advisories: CLEAR -- every advisory reported is listed at or above its severity, and every one listed is still reported");
+            out("advisories: CLEAR -- every advisory reported is listed at or above its severity, every one listed is still reported, and none is past its review date");
             finish(0);
           '
