@@ -35,6 +35,9 @@ jobs:
   audit:
     name: Advisories against the list
     runs-on: ubuntu-latest
+    # Three attempts at npm's default fetch timeout (300 s, retried twice) could hold a registry that drops packets for
+    # most of an hour, and the job default is six. 20 minutes ends it as a failure, which a rerun clears.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
