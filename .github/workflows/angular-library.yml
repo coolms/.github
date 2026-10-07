@@ -33,6 +33,11 @@ permissions:
   contents: read
 
 jobs:
+  # The committed lockfile's advisories against the package's list (npm-advisories.yml). On every push, pull request
+  # and the weekly schedule, so an advisory published in a quiet week is still found.
+  advisories:
+    uses: coolms/.github/.github/workflows/npm-advisories.yml@develop
+
   build:
     # !! The job's name is what branch protection requires (`ci / Node 22`,
     # `ci / Node 24`): it must not change. On 2026-09-26 it carried the resolve
@@ -59,7 +64,7 @@ jobs:
       # installs into an EMPTY tree, with no sibling packages and none of the
       # shared node_modules the working copy reaches through a symlink.
       #
-      # Two ways to resolve that tree (Dmitry, 2026-09-26). Until then there was
+      # Two ways to resolve that tree (decided 2026-09-26). Until then there was
       # no lockfile and every run resolved the newest versions -- so on
       # 2026-09-25 ng-packagr 22.2.1 changed its quote style and turned every
       # package's pull request red for a reason outside any of them.
