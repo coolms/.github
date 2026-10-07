@@ -1,18 +1,20 @@
 name: npm advisories
 
 # Advisories may only fall (2026-10-07). `npm audit` reads the COMMITTED lockfile, and every advisory it reports must
-# be on the repository's list (.github/advisories.txt by default; a missing list is an empty one). A new advisory
-# fails the job -- a dependency a pull request brings, or one published since the last run -- and so does a line on
-# the list whose advisory is no longer reported, so the list only shrinks.
+# be on the repository's list (.github/advisories.txt by default; a missing list is an empty one) at or above the
+# severity it was accepted at. It fails on:
+#   - an advisory not on the list: a dependency a pull request brings, or one published since the last run;
+#   - a line on the list whose advisory is no longer reported, so the list only shrinks;
+#   - an advisory now rated HIGHER than its line records (a lower rating is named and passes);
+#   - a package.json with no package-lock.json beside it, so removing the lockfile is no way round the check;
+#   - any npm error, and no report at all.
+# A check that could not evaluate does not pass either, because a green check reads as clear: when the registry is
+# out of reach (a network error or a 5xx) the audit is retried with backoff, then fails as
+# "UNEVALUABLE: registry unreachable". A rerun clears it.
 #
 # The list, one advisory per line, `#` starts a comment:
 #
-#   <package> <advisory id> <severity> <why it stays>
-#
-# When the registry cannot be asked (a network error or a 5xx), the run says the advisories were NOT evaluated, with a
-# warning, and does not fail: that is the network, not the change. It is never reported as clear. Any other error --
-# a lockfile npm cannot read, say -- fails, and so does no report at all: with --json npm reports even a network
-# failure as JSON. A listed severity the audit no longer reports fails too (re-rated).
+#   <package> <advisory id> <severity accepted at> <why it stays>
 
 on:
   workflow_call:
@@ -43,30 +45,28 @@ jobs:
         with:
           node-version: '22'
 
-      # The lockfile only: no install, so nothing a package runs at install time can change the answer.
-      - name: Audit the committed lockfile
-        run: |
-          test -f package-lock.json || { echo "::error::no package-lock.json in ${{ inputs.working-directory }}"; exit 1; }
-          npm audit --json --package-lock-only > "$RUNNER_TEMP/audit.json" 2> "$RUNNER_TEMP/audit.err" || true
-
+      # The lockfile only: no install, so nothing a package runs at install time can change the answer. The script runs
+      # `npm audit --json --package-lock-only` itself, so the retries are part of what is tested.
       - name: Advisories against the list
         env:
-          AUDIT: ${{ runner.temp }}/audit.json
           LIST: ${{ github.workspace }}/${{ inputs.list }}
         run: |
           node -e '
             const fs = require("fs");
-            const out = (line) => { console.log(line); summary.push(line); };
+            const { execSync } = require("child_process");
             const summary = [];
+            const out = (line) => { console.log(line); summary.push(line); };
             const finish = (code) => {
               if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "### Advisories against the list\n" + summary.join("\n") + "\n");
               process.exit(code);
             };
+            const sleep = (ms) => { if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
             const ghsa = /GHSA(-[23456789cfghjmpqrvwx]{4}){3}/;
+            const rank = { info: 0, low: 1, moderate: 2, medium: 2, high: 3, critical: 4 };
 
             const listPath = process.env.LIST;
             const listed = new Map();
-            const severity = new Map();
+            const accepted = new Map();
             const malformed = [];
             if (fs.existsSync(listPath)) {
               fs.readFileSync(listPath, "utf8").split("\n").forEach((raw, i) => {
@@ -74,75 +74,88 @@ jobs:
                 if (!text) return;
                 const f = text.split(/\s+/);
                 if (f.length < 3) { malformed.push(listPath + ":" + (i + 1) + ": want <package> <advisory> <severity> [why]"); return; }
+                if (!(f[2] in rank)) { malformed.push(listPath + ":" + (i + 1) + ": severity " + f[2] + " is not one of " + Object.keys(rank).join(", ")); return; }
                 const key = f[0] + " " + f[1];
                 if (listed.has(key)) { malformed.push(listPath + ":" + (i + 1) + ": " + key + " is listed twice (first at line " + listed.get(key) + ")"); return; }
                 listed.set(key, i + 1);
-                severity.set(key, f[2]);
+                accepted.set(key, f[2]);
               });
             }
 
-            let report = null;
-            let noReport = null;
-            try {
-              const text = fs.readFileSync(process.env.AUDIT, "utf8");
-              if (!text.trim()) noReport = "npm wrote nothing";
-              else report = JSON.parse(text);
-            } catch (e) {
-              noReport = noReport || ("npm wrote no report: " + String(e.message).split("\n")[0].slice(0, 160));
-            }
-            if (!noReport && (report === null || typeof report !== "object")) noReport = "npm wrote JSON that is not a report";
-            // With --json npm writes a JSON object even when the registry is out of reach (npm 11.19, measured 2026-10-07), so no
-            // report at all is npm itself failing: FOUND, never green under a warning.
-            if (noReport) {
-              out("advisories: FOUND -- " + noReport + " (with --json npm reports even a network failure as JSON)");
+            // The audit reads the COMMITTED lockfile. A package.json with none beside it fails by name: deleting the lockfile is
+            // no way round the check.
+            if (fs.existsSync("package.json") && !fs.existsSync("package-lock.json")) {
+              out("advisories: FOUND -- package.json has no package-lock.json beside it; the audit reads the committed lockfile");
               finish(1);
             }
-            // Only the registry out of reach is "not evaluated". Where npm puts the reason, measured: a network failure only in the
-            // top-level message ("... failed, reason: connect ECONNREFUSED ...", error.summary empty); a registry 5xx as
-            // statusCode; anything else as error.code (ENOLOCK: no lockfile, or one npm cannot parse). Any reason that is not the
-            // network is about the repository, and is FOUND: a broken lockfile must not stay green under a network warning.
+
+            // Where npm puts the reason it could not answer (npm 11.19, measured 2026-10-07): a network failure only in the
+            // top-level message ("... failed, reason: connect ECONNREFUSED ...", error.summary empty), a registry 5xx as
+            // statusCode, anything else as error.code (ENOLOCK: a lockfile npm cannot parse). With --json npm writes JSON even when
+            // the registry is out of reach, so no report at all is npm itself failing.
             const unreachable = /^(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|E5\d\d)$/;
-            let why = null;
-            if (!report.vulnerabilities) {
+            const audit = (command) => {
+              let text = "";
+              try { text = execSync(command, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 256 * 1024 * 1024 }); }
+              catch (e) { text = String(e.stdout || ""); }
+              if (!text.trim()) return { failed: "npm wrote nothing" };
+              let report;
+              try { report = JSON.parse(text); } catch (e) { return { failed: "npm wrote no report: " + String(e.message).split("\n")[0].slice(0, 160) }; }
+              if (report === null || typeof report !== "object") return { failed: "npm wrote JSON that is not a report" };
+              if (report.vulnerabilities) return { report };
               const err = report.error && typeof report.error === "object" ? report.error : {};
               const inMessage = /\bE[A-Z0-9_]{2,}\b/.exec(String(report.message || ""));
               const code = String(err.code || (report.statusCode ? "E" + report.statusCode : "") || (inMessage ? inMessage[0] : ""));
               const said = "npm said " + (code || "an error") + ": " + String(err.summary || report.message || "").trim().slice(0, 160);
-              if (!unreachable.test(code)) {
-                out("advisories: FOUND -- the audit failed for a reason that is not the network: " + said);
-                finish(1);
-              }
-              why = said;
-            }
+              return unreachable.test(code) ? { unreachable: said } : { failed: said };
+            };
 
-            if (why) {
-              out("advisories: NOT evaluated -- " + why + "; " + listed.size + " listed in " + listPath);
-              console.log("::warning::advisories were not evaluated -- " + why);
-              if (malformed.length) { malformed.forEach((m) => out("  LIST   " + m)); out("advisories: FOUND -- " + malformed.length + " malformed line(s)"); finish(1); }
-              finish(0);
+            // A check that could not evaluate must not pass: a green check reads as clear. The registry out of reach is retried
+            // with backoff, then fails as UNEVALUABLE; a rerun clears it.
+            const command = process.env.AUDIT_CMD || "npm audit --json --package-lock-only";
+            const backoff = (process.env.BACKOFF_MS || "10000,30000").split(",").map(Number);
+            let result = audit(command);
+            for (let attempt = 0; result.unreachable && attempt < backoff.length; attempt++) {
+              console.error("registry unreachable (" + result.unreachable + "); attempt " + (attempt + 2) + " in " + backoff[attempt] + " ms");
+              sleep(backoff[attempt]);
+              result = audit(command);
+            }
+            if (result.unreachable) {
+              out("advisories: UNEVALUABLE: registry unreachable -- " + result.unreachable + " (" + (backoff.length + 1) + " attempts); a rerun clears it");
+              console.log("::error::advisories could not be evaluated: registry unreachable");
+              finish(1);
+            }
+            if (result.failed) {
+              out("advisories: FOUND -- the audit failed for a reason that is not the network: " + result.failed);
+              finish(1);
             }
 
             const reported = new Map();
-            for (const v of Object.values(report.vulnerabilities)) {
+            for (const v of Object.values(result.report.vulnerabilities)) {
               for (const via of v.via || []) {
                 if (typeof via !== "object") continue;
                 const m = ghsa.exec(via.url || "");
-                reported.set((via.name || v.name) + " " + (m ? m[0] : String(via.source)), (via.severity || "unknown") + " " + (via.title || ""));
+                reported.set((via.name || v.name) + " " + (m ? m[0] : String(via.source)), { severity: via.severity || "unknown", title: via.title || "" });
               }
             }
+            const now = (k) => reported.get(k).severity;
             const fresh = [...reported.keys()].filter((k) => !listed.has(k)).sort();
             const gone = [...listed.keys()].filter((k) => !reported.has(k)).sort();
-            const rerated = [...listed.keys()].filter((k) => reported.has(k) && reported.get(k).split(" ")[0] !== severity.get(k)).sort();
+            // Each line records the severity the advisory was accepted at: a HIGHER one now fails, a lower one is named and passes
+            // (what was accepted at the higher severity covers the lower). A severity npm does not name counts as higher.
+            const higher = [...listed.keys()].filter((k) => reported.has(k) && !((rank[now(k)] ?? 99) <= rank[accepted.get(k)])).sort();
+            const lower = [...listed.keys()].filter((k) => reported.has(k) && rank[now(k)] < rank[accepted.get(k)]).sort();
 
             out("advisories: " + reported.size + " reported by npm audit (the committed lockfile) against " + listed.size + " listed in " + listPath);
-            fresh.forEach((k) => out("  NEW    " + k + " [" + reported.get(k) + "]"));
+            fresh.forEach((k) => out("  NEW    " + k + " [" + now(k) + " " + reported.get(k).title + "]"));
             gone.forEach((k) => out("  GONE   " + k + " -- cleared: take line " + listed.get(k) + " off the list"));
-            rerated.forEach((k) => out("  RERATED " + k + " -- listed " + severity.get(k) + ", reported " + reported.get(k).split(" ")[0] + ": line " + listed.get(k)));
+            higher.forEach((k) => out("  HIGHER " + k + " -- accepted at " + accepted.get(k) + ", now " + now(k) + ": line " + listed.get(k)));
+            lower.forEach((k) => out("  lower  " + k + " -- accepted at " + accepted.get(k) + ", now " + now(k) + " (passes; line " + listed.get(k) + " may record it)"));
             malformed.forEach((m) => out("  LIST   " + m));
-            if (fresh.length || gone.length || rerated.length || malformed.length) {
-              out("advisories: FOUND -- " + fresh.length + " new, " + gone.length + " cleared but still listed, " + rerated.length + " re-rated, " + malformed.length + " malformed line(s). A new advisory is cleared by an update, or written on the list with why it stays.");
+            if (fresh.length || gone.length || higher.length || malformed.length) {
+              out("advisories: FOUND -- " + fresh.length + " new, " + gone.length + " cleared but still listed, " + higher.length + " re-rated higher, " + malformed.length + " malformed line(s). A new advisory is cleared by an update, or written on the list with why it stays.");
               finish(1);
             }
-            out("advisories: CLEAR -- every advisory reported is listed, and every one listed is still reported");
+            out("advisories: CLEAR -- every advisory reported is listed at or above its severity, and every one listed is still reported");
             finish(0);
           '
