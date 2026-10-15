@@ -53,10 +53,10 @@ jobs:
           A package repository is one with composer.json or package.json at its root. Each must have:
             README.md     present and not empty;
             LICENSE       present (LICENSE, LICENSE.md or LICENSE.txt), and its text the license each manifest
-                          declares in `license`: composer.json's (a string, or a list of which one must match),
-                          and package.json's unless it is `"private": true` (a package.json that is never
-                          published declares nothing). A manifest that is published and declares no license
-                          is a failure too;
+                          declares in `license`: composer.json's (a string, or a list of which one must match)
+                          and package.json's. A manifest that declares no license is a failure too, except a
+                          package.json that is never published (`"private": true`); one that does declare
+                          a license is compared like any other;
             CHANGELOG.md  present and not empty.
           A license is recognised by its text (LICENSES below): by a phrase only that license's text holds,
           never by a name another text mentions. A declared license with no fingerprint here, or a LICENSE
@@ -128,8 +128,10 @@ jobs:
 
           def declared(manifest_name, data):
               """The licenses one manifest declares, as written: a list of strings, [] for none, or None when
-              the manifest declares nothing because it is never published."""
-              if manifest_name == 'package.json' and data.get('private') is True:
+              it declares none and need not -- a package.json that is never published ("private": true). A
+              license it does declare is compared like any other: private waives only the need to declare."""
+              private = manifest_name == 'package.json' and data.get('private') is True
+              if private and data.get('license') is None and data.get('licenses') is None:
                   return None
               v = data.get('license')
               if v is None and manifest_name == 'package.json' and isinstance(data.get('licenses'), list):
