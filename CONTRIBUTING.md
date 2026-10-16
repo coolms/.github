@@ -11,6 +11,9 @@ issue of its own.
 
 ## Releases leave on Tuesdays
 
+While CoolMS is in alpha, a release goes out when it is needed. The Tuesday train
+described here starts with the first beta.
+
 `develop` is the integration branch. Merge there when your work is green.
 
 **A release train leaves on Tuesday.** Whatever is in `develop` and passing goes
