@@ -1,0 +1,349 @@
+name: Basic files
+
+# Does this public package repository carry README.md, a LICENSE matching its manifests' `license`, and CHANGELOG.md?
+# A package repository is one with composer.json or package.json at its root; what each file must be, and how a
+# license is recognised, is in the check's own docstring below. Exit 0 CLEAR, 1 FOUND, 2 UNEVALUABLE: the job fails
+# on both 1 and 2, because a check that could not evaluate is not a pass.
+#
+# The check is a byte-for-byte copy of release-tools' check-public-repo-files.py, rendered there
+# (basic-files-workflow.py) and compared there with this file at the commit callers pin to. Do not edit it here.
+#
+# Call it PINNED to a commit of this repository, never @develop or a tag, so a change here cannot change a caller's CI
+# unseen:
+#
+#   basic-files:
+#     uses: coolms/.github/.github/workflows/basic-files.yml@<40-character commit>
+#
+# It reads the repository's contents and nothing else: no inputs, no secrets, a checkout that keeps no credentials,
+# and no network call after the checkout.
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: README, LICENSE and CHANGELOG
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: The check
+        run: |
+          cat > "$RUNNER_TEMP/check-public-repo-files.py" <<'BASIC_FILES_CHECK'
+          #!/usr/bin/env python3
+          """Does a public package repository carry its README.md, LICENSE and CHANGELOG.md?
+
+          coolms/mime was public with none of the three. A package's page is the first thing a reader sees,
+          and a LICENSE is what lets anyone use it at all -- nothing else notices when one is missing.
+
+          Two ways to run:
+            check-public-repo-files.py [DIR ...]
+                The working tree of each DIR (default: the current directory). What a repository's CI, or
+                its local verification, runs.
+            check-public-repo-files.py --account coolms
+                Every public repository of the account, read from its default branch over the GitHub API
+                (`gh`, as the account it is logged in as, or GH_TOKEN).
+
+          A package repository is one with composer.json or package.json at its root. Each must have:
+            README.md     present and not empty;
+            LICENSE       present (LICENSE, LICENSE.md or LICENSE.txt), and its text the license each manifest
+                          declares in `license`: composer.json's (a string, or a list of which one must match)
+                          and package.json's. A manifest that declares no license is a failure too, except a
+                          package.json that is never published (`"private": true`); one that does declare
+                          a license is compared like any other;
+            CHANGELOG.md  present and not empty.
+          A license is recognised by its text (LICENSES below): by a phrase only that license's text holds,
+          never by a name another text mentions. A declared license with no fingerprint here, or a LICENSE
+          whose text matches none of them or more than one, cannot be compared: UNEVALUABLE, never passed.
+
+          The account sweep reports archived repositories apart -- they are read-only, and nothing can be
+          fixed there without un-archiving -- and names the public repositories that are not package
+          repositories (no manifest at the root) and the empty ones (no commit). Its exit is decided by the
+          active package repositories.
+
+          Exit: 0 CLEAR, 1 FOUND (a file missing or empty, a license not matching or not declared),
+          2 UNEVALUABLE (nothing read, a repository that could not be read, a license that could not be
+          compared). Every failure line names the repository and the file.
+          """
+          import base64
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          LICENSE_NAMES = ('LICENSE', 'LICENSE.md', 'LICENSE.txt')
+
+
+          def norm(text):
+              return re.sub(r'\s+', ' ', text).strip().lower()
+
+
+          # SPDX id -> (phrases its text must hold, phrases it must not), whitespace and case folded. Each is a
+          # phrase ONLY that license's own text holds -- its preamble or title -- never a name another text
+          # mentions: the GPL-3.0 ends by naming the Lesser GPL, the AGPL-3.0 names version 3 of the GPL, the
+          # MPL-2.0 names both. A text that matches none, or more than one, is not recognised.
+          LICENSES = [
+              ('GPL-3.0', ['the gnu general public license is a free, copyleft license for software and other kinds of works'],
+               []),
+              ('LGPL-3.0', ['this version of the gnu lesser general public license incorporates the terms and conditions of '
+                            'version 3 of the gnu general public license'], []),
+              ('AGPL-3.0', ['the gnu affero general public license is a free, copyleft license for software and other kinds '
+                            'of works'], []),
+              ('Apache-2.0', ['apache license version 2.0, january 2004',
+                              'terms and conditions for use, reproduction, and distribution'], []),
+              ('MPL-2.0', ['mozilla public license version 2.0'], []),
+              ('BSD-3-Clause', ['redistribution and use in source and binary forms', 'neither the name'], []),
+              ('BSD-2-Clause', ['redistribution and use in source and binary forms'], ['neither the name']),
+              ('ISC', ['permission to use, copy, modify, and/or distribute this software for any purpose'], []),
+              ('MIT', ['permission is hereby granted, free of charge, to any person obtaining a copy',
+                       'the above copyright notice and this permission notice shall be included'], []),
+          ]
+          KNOWN = {spdx for spdx, _, _ in LICENSES}
+
+
+          def text_license(text):
+              t = norm(text)
+              hits = [spdx for spdx, must, never in LICENSES
+                      if all(p in t for p in must) and not any(p in t for p in never)]
+              return hits[0] if len(hits) == 1 else None
+
+
+          def declared_id(value):
+              """An SPDX id as a manifest writes it, folded onto the ids LICENSES knows: GPL-3.0-only,
+              GPL-3.0-or-later and GPL-3.0+ are GPL-3.0's text. None for one it does not know."""
+              v = value.strip()
+              v = re.sub(r'(-only|-or-later|\+)$', '', v)
+              for spdx in KNOWN:
+                  if v.lower() == spdx.lower():
+                      return spdx
+              return None
+
+
+          def declared(manifest_name, data):
+              """The licenses one manifest declares, as written: a list of strings, [] for none, or None when
+              it declares none and need not -- a package.json that is never published ("private": true). A
+              license it does declare is compared like any other: private waives only the need to declare."""
+              private = manifest_name == 'package.json' and data.get('private') is True
+              if private and data.get('license') is None and data.get('licenses') is None:
+                  return None
+              v = data.get('license')
+              if v is None and manifest_name == 'package.json' and isinstance(data.get('licenses'), list):
+                  v = [x.get('type') for x in data['licenses'] if isinstance(x, dict)]
+              if isinstance(v, dict):
+                  v = v.get('type')
+              if isinstance(v, str):
+                  # An SPDX expression "(MIT OR Apache-2.0)": any one of them.
+                  return [p for p in re.split(r'\s+OR\s+', v.strip('() ')) if p]
+              if isinstance(v, list):
+                  return [x for x in v if isinstance(x, str) and x]
+              return []
+
+
+          def check(name, files):
+              """One repository's verdict. `files`: root file name -> its text (None: present but not read).
+              Returns (failures, unevaluable, per-file pass map)."""
+              failures, unevaluable = [], []
+              ok = {}
+              for f in ('README.md', 'CHANGELOG.md'):
+                  if f not in files:
+                      failures.append('%s: %s missing' % (name, f))
+                      ok[f] = False
+                  elif files[f] is not None and files[f].strip() == '':
+                      failures.append('%s: %s is empty' % (name, f))
+                      ok[f] = False
+                  else:
+                      ok[f] = True
+
+              manifests = {}
+              for m in ('composer.json', 'package.json'):
+                  if m in files:
+                      try:
+                          manifests[m] = json.loads(files[m])
+                      except (TypeError, ValueError) as e:
+                          unevaluable.append('%s: %s could not be read as JSON (%s)' % (name, m, e))
+              lic_file = next((n for n in LICENSE_NAMES if n in files), None)
+              ok['LICENSE'] = False
+              if lic_file is None:
+                  wants = sorted({x for m in manifests for x in (declared(m, manifests[m]) or [])})
+                  failures.append('%s: LICENSE missing%s' % (
+                      name, (' (declared: %s)' % ', '.join(wants)) if wants else ''))
+                  return failures, unevaluable, ok
+              text = files[lic_file] or ''
+              is_ = text_license(text)
+              if is_ is None:
+                  unevaluable.append('%s: %s is not recognised: it matches none of the licenses this check knows, or more '
+                                     'than one (%s)' % (name, lic_file, ', '.join(sorted(KNOWN))))
+                  return failures, unevaluable, ok
+              license_ok = True
+              for m, data in sorted(manifests.items()):
+                  wants = declared(m, data)
+                  if wants is None:
+                      continue
+                  if not wants:
+                      failures.append('%s: %s declares no license (%s is %s)' % (name, m, lic_file, is_))
+                      license_ok = False
+                      continue
+                  ids = [declared_id(w) for w in wants]
+                  if is_ in ids:
+                      continue
+                  if all(i is None for i in ids):
+                      unevaluable.append('%s: %s declares %s, which this check cannot compare with a text'
+                                         % (name, m, ' OR '.join(wants)))
+                      license_ok = False
+                      continue
+                  failures.append('%s: %s is %s, %s declares %s' % (name, lic_file, is_, m, ' OR '.join(wants)))
+                  license_ok = False
+              ok['LICENSE'] = license_ok and not unevaluable
+              return failures, unevaluable, ok
+
+
+          def read_tree(path):
+              files = {}
+              for n in os.listdir(path):
+                  p = os.path.join(path, n)
+                  if not os.path.isfile(p):
+                      continue
+                  if n in ('README.md', 'CHANGELOG.md', 'composer.json', 'package.json') or n in LICENSE_NAMES:
+                      with open(p, encoding='utf-8', errors='replace') as fh:
+                          files[n] = fh.read()
+              return files
+
+
+          def gh(path):
+              r = subprocess.run(['gh', 'api', path], capture_output=True, text=True, timeout=120)
+              if r.returncode != 0:
+                  raise RuntimeError('gh api %s: %s' % (path, (r.stderr or r.stdout).strip()[:200]))
+              return json.loads(r.stdout)
+
+
+          def read_remote(full, branch):
+              files = {}
+              for e in gh('repos/%s/contents?ref=%s' % (full, branch)):
+                  n = e.get('name')
+                  if e.get('type') != 'file':
+                      continue
+                  if n in ('composer.json', 'package.json') or n in LICENSE_NAMES:
+                      c = gh('repos/%s/contents/%s?ref=%s' % (full, n, branch))
+                      files[n] = base64.b64decode(c.get('content', '')).decode('utf-8', 'replace')
+                  elif n in ('README.md', 'CHANGELOG.md'):
+                      # Its size says whether it is empty; its text is not needed.
+                      files[n] = '' if e.get('size', 0) == 0 else None
+              return files
+
+
+          def tally(rows, label):
+              m = len(rows)
+              print('%s: %d' % (label, m))
+              for f in ('README.md', 'LICENSE', 'CHANGELOG.md'):
+                  n = sum(1 for _, ok in rows if ok.get(f))
+                  print('  %-13s %d of %d' % (f, n, m))
+
+
+          def sweep(account):
+              repos = []
+              page = 1
+              while True:
+                  batch = gh('users/%s/repos?type=owner&per_page=100&page=%d' % (account, page))
+                  if not batch:
+                      break
+                  repos += [r for r in batch if not r.get('private')]
+                  page += 1
+              if not repos:
+                  print('UNEVALUABLE: no public repository of %s was read' % account)
+                  return 2
+              active, archived, not_package, empty, unread = [], [], [], [], []
+              failures, unevaluable, archived_gaps = [], [], []
+              for r in sorted(repos, key=lambda r: r['name']):
+                  full = r['full_name']
+                  try:
+                      files = read_remote(full, r['default_branch'])
+                  except Exception as e:  # noqa: BLE001 -- a repository that cannot be read is named, never counted as clear
+                      # A repository with no commit has nothing to read: it is named apart, not counted as unread.
+                      if 'This repository is empty' in str(e):
+                          empty.append(full)
+                      else:
+                          unread.append('%s: not read (%s)' % (full, e))
+                      continue
+                  if 'composer.json' not in files and 'package.json' not in files:
+                      not_package.append(full)
+                      continue
+                  f, u, ok = check(full, files)
+                  if r.get('archived'):
+                      archived.append((full, ok))
+                      archived_gaps += f + u
+                      continue
+                  active.append((full, ok))
+                  failures += f
+                  unevaluable += u
+              print('public repositories of %s: %d = %d package repositories + %d archived + %d not package '
+                    'repositories + %d empty + %d not read' % (account, len(repos), len(active), len(archived),
+                                                              len(not_package), len(empty), len(unread)))
+              tally(active, 'package repositories (decide the exit)')
+              tally(archived, 'archived package repositories (read-only, reported apart)')
+              if not_package:
+                  print('not package repositories (no composer.json or package.json at the root): ' + ', '.join(not_package))
+              if empty:
+                  print('empty repositories (no commit): ' + ', '.join(empty))
+              for line in archived_gaps:
+                  print('archived  ' + line)
+              if not active and not unread:
+                  print('UNEVALUABLE: no package repository among the %d public ones' % len(repos))
+                  return 2
+              return verdict(failures, unevaluable + unread, len(active) + len(unread), 'package repositories')
+
+
+          def verdict(failures, unevaluable, total, unit):
+              """The lines, then the answer: FOUND decides the exit when there is any, and what could not be
+              evaluated is still said beside it -- it is never folded into a CLEAR or a FOUND."""
+              for line in failures:
+                  print('FOUND  ' + line)
+              for line in unevaluable:
+                  print('UNEVALUABLE  ' + line)
+              named = lambda lines: len({l.split(':')[0] for l in lines})  # noqa: E731
+              if failures:
+                  print('FOUND: %d failure(s) in %d of %d %s' % (len(failures), named(failures), total, unit))
+              if unevaluable:
+                  print('UNEVALUABLE: %d of %d %s could not be fully evaluated' % (named(unevaluable), total, unit))
+              if failures:
+                  return 1
+              if unevaluable:
+                  return 2
+              print('CLEAR: %d of %d %s carry README.md, a LICENSE matching their manifests, and CHANGELOG.md'
+                    % (total, total, unit))
+              return 0
+
+
+          def local(dirs):
+              failures, unevaluable = [], []
+              for d in dirs:
+                  name = os.path.basename(os.path.abspath(d))
+                  files = read_tree(d)
+                  if 'composer.json' not in files and 'package.json' not in files:
+                      unevaluable.append('%s: not a package repository (no composer.json or package.json at its root)' % name)
+                      continue
+                  f, u, _ = check(name, files)
+                  failures += f
+                  unevaluable += u
+              return verdict(failures, unevaluable, len(dirs), 'director(ies)')
+
+
+          def main(argv):
+              if argv[:1] == ['--account']:
+                  if len(argv) != 2:
+                      print('usage: check-public-repo-files.py --account <account>', file=sys.stderr)
+                      return 2
+                  return sweep(argv[1])
+              return local(argv or ['.'])
+
+
+          if __name__ == '__main__':
+              sys.exit(main(sys.argv[1:]))
+          BASIC_FILES_CHECK
+          python3 -I "$RUNNER_TEMP/check-public-repo-files.py" .

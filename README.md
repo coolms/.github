@@ -77,3 +77,29 @@ jobs:
 # .github/advisories.txt -- <package> <advisory id> <severity accepted at> <why it stays>
 source-map-js  GHSA-68fv-2mgg-jv7q  high  build tool only; the update waits for its dependents
 ```
+
+## `basic-files.yml`
+
+Does a public package repository (composer.json or package.json at its root) carry
+`README.md`, a `LICENSE` whose text is the license its manifests declare, and
+`CHANGELOG.md`? A license is recognised by a phrase only its own text holds. A
+declared license the check cannot compare, or a `LICENSE` it does not recognise,
+fails the job as UNEVALUABLE: a check that could not evaluate is not a pass.
+
+The check is a byte-for-byte copy of the one release-tools keeps, rendered there
+and compared there with this file at the commit callers pin to. Do not edit it
+here. The job reads the repository's contents and nothing else: no inputs, no
+secrets, a checkout that keeps no credentials, and no network call after it.
+
+**Call it pinned to a commit of this repository, never `@develop` or a tag**, so a
+change here cannot change a caller's CI unseen. When the check changes, every
+caller's pin is moved in one sweep, and each repository's next run proves it.
+
+```yaml
+jobs:
+  basic-files:
+    uses: coolms/.github/.github/workflows/basic-files.yml@<40-character commit>
+```
+
+Archived repositories are not checked. An empty repository is checked once it has
+content.
