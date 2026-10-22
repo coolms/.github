@@ -26,16 +26,15 @@ jobs:
   ci:
     uses: coolms/.github/.github/workflows/angular-library.yml@develop
     with:
-      node-versions: '["22","24"]'
       bundle: dist/fesm2022/coolms-<name>.mjs   # optional
 ```
 
 | input | default | purpose |
 |---|---|---|
-| `node-versions` | `["22","24"]` | JSON array of Node majors to run |
+| `node-versions` | `["22","24","26"]` | JSON array of Node majors to run; `engines.node` must name exactly these |
 | `bundle` | `''` | fesm2022 bundle path; when given, asserts the framework stayed external. Empty skips that step. |
 
-The steps are install, typecheck, lint, build, and two positive assertions — that
+The steps are install, an engines check, typecheck, lint, build, and two positive assertions — that
 the build produced a package, and that Angular did not end up inside the bundle.
 Beside them, an `advisories` job holds the committed lockfile's advisories against
 the package's `.github/advisories.txt` (`npm-advisories.yml`, below).
