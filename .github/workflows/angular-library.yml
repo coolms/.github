@@ -123,6 +123,30 @@ jobs:
             console.log(lines.slice(0, 2).join("\n"));
           '
 
+      # engines.node names exactly the Node lines this matrix runs (no open
+      # ">=26"), and within each the highest floor any package in the installed
+      # lockfile declares. A `latest` run reads the freshly resolved lockfile, so
+      # a dependency that raises its floor shows up there first. The script comes
+      # from this repository at develop, the ref the callers use; it is removed
+      # again so no later step lints or packs it.
+      - name: Check out the shared scripts
+        uses: actions/checkout@v4
+        with:
+          repository: coolms/.github
+          ref: develop
+          path: .coolms-github
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Engines, against the matrix and the lockfile
+        env:
+          MAJORS: ${{ inputs.node-versions }}
+        run: |
+          status=0
+          node .coolms-github/.github/scripts/engines-check.mjs --root . --majors "$MAJORS" || status=$?
+          rm -rf .coolms-github
+          exit $status
+
       # Types first: the cheapest signal, and the one most likely to catch a
       # sibling API change, since these libraries are consumed from source by
       # the application rather than from a published build.
