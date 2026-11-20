@@ -9,7 +9,8 @@ name: npm advisories
 #   - a line past its review date (2026-10-07): at most 30 days out for critical and high, 90 for the rest. A review
 #     writes a new date and the reason as it stands then; a date further out than that is a malformed line;
 #   - a package.json with no package-lock.json beside it, so removing the lockfile is no way round the check;
-#   - any npm error, and no report at all.
+#   - any npm error, and no report at all. npm is always told to ask the registry (--offline=false --prefer-offline=false):
+#     told to work offline by an .npmrc or the environment, it answers an empty report.
 # A check that could not evaluate does not pass either, because a green check reads as clear: when the registry is
 # out of reach (a network error or a 5xx) the audit is retried with backoff, then fails as
 # "UNEVALUABLE: registry unreachable". A rerun clears it.
@@ -58,7 +59,9 @@ jobs:
           node-version: '22'
 
       # The lockfile only: no install, so nothing a package runs at install time can change the answer. The script runs
-      # `npm audit --json --package-lock-only` itself, so the retries are part of what is tested.
+      # `npm audit --json --package-lock-only --offline=false --prefer-offline=false` itself, so the retries are part of what
+      # is tested. npm is told to ask the registry: told to work offline (an .npmrc, npm_config_offline) it answers an empty
+      # report, which would read as clear.
       - name: Advisories against the list
         env:
           LIST: ${{ github.workspace }}/${{ inputs.list }}
@@ -136,7 +139,7 @@ jobs:
 
             // A check that could not evaluate must not pass: a green check reads as clear. The registry out of reach is retried
             // with backoff, then fails as UNEVALUABLE; a rerun clears it.
-            const command = process.env.AUDIT_CMD || "npm audit --json --package-lock-only";
+            const command = process.env.AUDIT_CMD || "npm audit --json --package-lock-only --offline=false --prefer-offline=false";
             const backoff = (process.env.BACKOFF_MS || "10000,30000").split(",").map(Number);
             let result = audit(command);
             for (let attempt = 0; result.unreachable && attempt < backoff.length; attempt++) {
